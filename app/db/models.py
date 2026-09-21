@@ -96,11 +96,25 @@ class EducationInfo(Base, UUIDMixin, TimestampMixin):
 
 
 class Skill(Base, UUIDMixin, TimestampMixin):
+    """Reusable skill vocabulary (V1: student self-report + twin proficiency).
+
+    V2-A1 Skill Graph: a skill may belong to exactly one curriculum topic
+    (`topic_id`, NULL for free-form student-declared skills), and questions
+    link to skills through `question_skills`. Twin formulas are unchanged.
+    """
+
     __tablename__ = "skills"
 
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    topic_id: Mapped[str | None] = mapped_column(
+        ForeignKey("topics.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
+    topic: Mapped["Topic | None"] = relationship(back_populates="skills")
     profile_links: Mapped[list["ProfileSkill"]] = relationship(back_populates="skill")
+    question_links: Mapped[list["QuestionSkill"]] = relationship(
+        back_populates="skill", cascade="all,delete"
+    )
 
 
 class ProfileSkill(Base, UUIDMixin):
@@ -192,6 +206,7 @@ class Topic(Base, UUIDMixin, TimestampMixin):
         back_populates="topic", cascade="all,delete", order_by="ContentItem.order_index"
     )
     assessments: Mapped[list["Assessment"]] = relationship(back_populates="topic")
+    skills: Mapped[list["Skill"]] = relationship(back_populates="topic")
 
 
 class ContentItem(Base, UUIDMixin, TimestampMixin):
@@ -273,6 +288,62 @@ class Question(Base, UUIDMixin, TimestampMixin):
     options: Mapped[list["QuestionOption"]] = relationship(
         back_populates="question", cascade="all,delete", order_by="QuestionOption.order_index"
     )
+    skill_links: Mapped[list["QuestionSkill"]] = relationship(
+        back_populates="question", cascade="all,delete"
+    )
+
+
+class QuestionSkill(Base, UUIDMixin):
+    """V2-A1 Skill Graph edge: which skills a question assesses.
+
+    Pure content markup (no student evidence): mapping rows die with their
+    question (CASCADE) or skill (CASCADE) and never touch answers/attempts.
+    """
+
+    __tablename__ = "question_skills"
+    __table_args__ = (UniqueConstraint("question_id", "skill_id"),)
+
+    question_id: Mapped[str] = mapped_column(
+        ForeignKey("questions.id", ondelete="CASCADE"), index=True
+    )
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+
+    question: Mapped[Question] = relationship(back_populates="skill_links")
+    skill: Mapped[Skill] = relationship(back_populates="question_links")
+
+
+# ---------------- V2-A3: skill evidence ----------------
+
+
+class SkillEvidence(Base, UUIDMixin, TimestampMixin):
+    """Append-only skill evidence: one row per (submitted answer x mapped skill).
+
+    Semantics: "this submitted answer provides evidence about this skill"
+    with the server-authoritative correctness (`is_correct`). NOT mastery,
+    NOT confidence — a future engine consumes these rows.
+
+    Attributability: every row keeps its direct student/question/attempt
+    references, independent of the live QuestionSkill edge that produced it
+    (edge removal never deletes evidence). Idempotency: the unique triple
+    backstops the idempotent submit path so a retried submission can never
+    double-count. Deletion: evidence lives and dies with its attempt
+    (CASCADE); skill deletion is RESTRICTed so history stays attributable.
+    """
+
+    __tablename__ = "skill_evidence"
+    __table_args__ = (UniqueConstraint("attempt_id", "question_id", "skill_id"),)
+
+    profile_id: Mapped[str] = mapped_column(
+        ForeignKey("student_profiles.id", ondelete="CASCADE"), index=True
+    )
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="RESTRICT"), index=True)
+    question_id: Mapped[str] = mapped_column(
+        ForeignKey("questions.id", ondelete="CASCADE"), index=True
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("attempts.id", ondelete="CASCADE"), index=True
+    )
+    is_correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 
 class QuestionOption(Base, UUIDMixin):
@@ -406,8 +477,22 @@ class TwinSkillProficiency(Base, UUIDMixin, TimestampMixin):
         ForeignKey("student_profiles.id", ondelete="CASCADE"), index=True
     )
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
-    proficiency: Mapped[float] = mapped_column()  # 0..1
+    # Self-report track (V1, unchanged meaning): stated level pulled toward
+    # accuracy. NULL when the student never self-reported this skill.
+    proficiency: Mapped[float | None] = mapped_column(nullable=True)  # 0..1
     evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Provenance: self_report | assessed | self_report+assessed.
+    source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Evidence-derived track (V2-B2, from SkillEvidence via skill_mastery).
+    # All NULL/0 when no evidence exists — never fabricated.
+    mastery: Mapped[float | None] = mapped_column(nullable=True)  # 0..1
+    confidence: Mapped[float | None] = mapped_column(nullable=True)  # 0..1
+    skill_evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    correct_count: Mapped[int] = mapped_column(Integer, default=0)
+    incorrect_count: Mapped[int] = mapped_column(Integer, default=0)
+    trend: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    trend_slope: Mapped[float | None] = mapped_column(nullable=True)
+    last_updated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TwinSnapshot(Base, UUIDMixin):
@@ -426,6 +511,49 @@ class TwinSnapshot(Base, UUIDMixin):
     overall_accuracy: Mapped[float | None] = mapped_column(nullable=True)
     changes_json: Mapped[str] = mapped_column(Text, default="[]")
     summary: Mapped[str] = mapped_column(Text, default="")
+
+
+class TwinEvolutionEvent(Base, UUIDMixin):
+    """V2-C1 append-only per-metric change record: structured twin history.
+
+    Complements TwinSnapshot (per-submit rollup with an opaque changes blob):
+    one row per dimension-metric that actually moved under the established
+    >= 0.005 rule, so history answers which attempt/evidence changed which
+    metric from what to what. No event is created when nothing moved.
+    Dimension refs stay plain strings (history must survive content
+    deletion); only profile/snapshot/attempt are foreign keys.
+    """
+
+    __tablename__ = "twin_evolution_events"
+
+    profile_id: Mapped[str] = mapped_column(
+        ForeignKey("student_profiles.id", ondelete="CASCADE"), index=True
+    )
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("twin_snapshots.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # assessment_submitted | profile_updated (mirrors snapshot trigger vocabulary).
+    trigger_type: Mapped[str] = mapped_column(String(32))
+    trigger_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Direct attempt link for assessment-driven changes; NULL for self-report
+    # track changes (which is itself the provenance signal). SET NULL keeps
+    # the event if its attempt is ever removed.
+    attempt_id: Mapped[str | None] = mapped_column(
+        ForeignKey("attempts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # subject | topic | skill. Metric distinguishes the twin tracks sharing
+    # the skill dimension: proficiency (self-report) vs mastery/confidence/
+    # trend (evidence-derived); subjects/topics only ever carry mastery.
+    dimension: Mapped[str] = mapped_column(String(16))
+    ref: Mapped[str] = mapped_column(String(36))  # subject/topic/skill id
+    label: Mapped[str] = mapped_column(String(200))  # denormalized display name
+    metric: Mapped[str] = mapped_column(String(16))  # mastery|proficiency|confidence|trend
+    old_value: Mapped[float | None] = mapped_column(nullable=True)
+    new_value: Mapped[float | None] = mapped_column(nullable=True)
+    # Trend direction transitions (the only non-numeric change recorded).
+    old_label: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    new_label: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 # ---------------- Phase 5A: product layer ----------------

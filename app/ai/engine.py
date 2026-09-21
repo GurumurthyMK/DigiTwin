@@ -282,7 +282,13 @@ def recommendations(features: dict) -> dict:
             }
         )
 
-    for skid, sk in sorted(twin["skills"].items(), key=lambda kv: kv[1]["proficiency"])[:2]:
+    # V2-B2 compat: recommendations still use self-reported proficiency only;
+    # assessed-only rows (proficiency None) are not self-reports. No-op on
+    # pre-V2-B2 data where every row carries proficiency.
+    _self_reported = {
+        skid: sk for skid, sk in twin["skills"].items() if sk["proficiency"] is not None
+    }
+    for skid, sk in sorted(_self_reported.items(), key=lambda kv: kv[1]["proficiency"])[:2]:
         if sk["proficiency"] < 0.5:
             recs.append(
                 {
@@ -362,7 +368,9 @@ def career_matches(features: dict) -> dict:
     # the engine always works from compute output for determinism).
     subj_mastery = {v["code"]: v["mastery"] for v in twin["subjects"].values()}
     subj_ev = {v["code"]: v["evidence_count"] for v in twin["subjects"].values()}
-    skill_prof = {v["name"]: v["proficiency"] for v in twin["skills"].values()}
+    skill_prof = {
+        v["name"]: v["proficiency"] for v in twin["skills"].values() if v["proficiency"] is not None
+    }
 
     results = []
     for c in taxonomy.CAREERS:

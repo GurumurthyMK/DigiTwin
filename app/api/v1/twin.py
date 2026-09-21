@@ -29,3 +29,20 @@ def twin_snapshots(
 ):
     profile = get_my_profile(db, user.id)
     return twin_service.list_snapshots(db, profile.id, limit=min(max(limit, 1), 100))
+
+
+@router.get("/profiles/me/twin/evolution", response_model=list[s.TwinEvolutionEventOut])
+def twin_evolution(
+    limit: int = 50, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)
+):
+    profile = get_my_profile(db, user.id)
+    return twin_service.list_evolution_events(db, profile.id, limit=limit)
+
+
+# Spec alias: GET /api/v1/twin/evolution (same semantics, same scoping).
+@router.get("/twin/evolution", response_model=list[s.TwinEvolutionEventOut])
+def twin_evolution_alias(
+    limit: int = 50, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)
+):
+    profile = get_my_profile(db, user.id)
+    return twin_service.list_evolution_events(db, profile.id, limit=limit)

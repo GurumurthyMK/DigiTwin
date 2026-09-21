@@ -116,7 +116,8 @@ def main() -> int:
     s, hist = web.call("GET", "/api/v1/profiles/me/attempts")
     check("8. performance record present", any(h["id"] == att["id"] for h in hist))
     s, tw = web.call("GET", "/api/v1/profiles/me/twin")
-    check("9. twin updated from evidence", tw["has_evidence"] and tw["version"] == 1 and tw["overall_accuracy"] == res["accuracy"])
+    # V2-C1: version 2 = step-4 skill-link snapshot + this submit snapshot.
+    check("9. twin updated from evidence", tw["has_evidence"] and tw["version"] == 2 and tw["overall_accuracy"] == res["accuracy"])
     s, ins = web.call("GET", "/api/v1/profiles/me/insights")
     s, pred = web.call("GET", "/api/v1/profiles/me/prediction")
     check("10. AI analysis generated", isinstance(ins, list) and pred["status"] in ("ready", "insufficient_data"))
@@ -134,7 +135,7 @@ def main() -> int:
     s, mhist = mob.call("GET", "/api/v1/profiles/me/attempts")
     check("15. same performance on mobile", any(h["id"] == att["id"] for h in mhist))
     s, mtw = mob.call("GET", "/api/v1/profiles/me/twin")
-    check("16. same twin on mobile", mtw["overall_mastery"] == tw["overall_mastery"] and mtw["version"] == 1)
+    check("16. same twin on mobile", mtw["overall_mastery"] == tw["overall_mastery"] and mtw["version"] == 2)
     s, mins = mob.call("GET", "/api/v1/profiles/me/insights")
     check("17. same AI insights on mobile", len(mins) == len(ins))
 
@@ -155,9 +156,9 @@ def main() -> int:
 
     # 20-22. Twin changed; WEB sees everything.
     s, mtw2 = mob.call("GET", "/api/v1/profiles/me/twin")
-    check("20. twin changed after mobile attempt", mtw2["version"] == 2 and mtw2["overall_mastery"] != mtw["overall_mastery"])
+    check("20. twin changed after mobile attempt", mtw2["version"] == 3 and mtw2["overall_mastery"] != mtw["overall_mastery"])
     s, wtw = web.call("GET", "/api/v1/profiles/me/twin")
-    check("21+22a. web sees updated twin", wtw["version"] == 2 and wtw["overall_mastery"] == mtw2["overall_mastery"])
+    check("21+22a. web sees updated twin", wtw["version"] == 3 and wtw["overall_mastery"] == mtw2["overall_mastery"])
     s, whist = web.call("GET", "/api/v1/profiles/me/attempts")
     check("21+22b. web sees mobile attempt in history", any(h["id"] == att2["id"] for h in whist))
     s, wnotes = web.call("GET", "/api/v1/profiles/me/notifications")

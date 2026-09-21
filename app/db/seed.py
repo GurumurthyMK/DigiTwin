@@ -34,6 +34,7 @@ def seed_reference_data() -> None:
                 db.add(models.Skill(name=name))
         db.commit()
         seed_learning_data(db)
+        seed_skill_graph(db)
         db.commit()
     finally:
         db.close()
@@ -414,3 +415,93 @@ def seed_learning_data(db) -> None:
                             order_index=oi,
                         )
                     )
+
+
+# V2-A1 Skill Graph seed: a small deterministic curriculum taxonomy.
+# (skill_name, subject_code, topic_title). Pre-existing generic skills
+# (SKILLS above) stay topic-less: they remain student-declared vocabulary.
+SKILL_TAXONOMY = [
+    ("Solving Linear Equations", "MATH-101", "Linear Equations"),
+    ("Fraction Arithmetic", "MATH-101", "Fractions & Ratios"),
+    ("Writing Thesis Statements", "ENG-101", "Thesis Statements"),
+    ("Paragraph Structure", "ENG-101", "Paragraph Structure"),
+    ("Experimental Design", "SCI-101", "The Scientific Method"),
+    ("SI Units", "SCI-101", "Units & Measurement"),
+    ("Measurement Precision", "SCI-101", "Units & Measurement"),
+    ("Algorithms & Control Flow", "CS-101", "Algorithms & Pseudocode"),
+    ("Binary & Data Types", "CS-101", "Data: Bits & Types"),
+    ("Measures of Center", "STAT-101", "Mean, Median, Mode"),
+    ("Sampling Methods", "STAT-101", "Sampling & Bias"),
+]
+
+# Question prompt -> skill name. A prompt is mapped only when its content
+# clearly exercises the skill; ambiguous questions stay unmapped (opt-in).
+QUESTION_SKILL_MAP = {
+    "If x + 7 = 15, what is x?": "Solving Linear Equations",
+    "If 3x = 21, what is x?": "Solving Linear Equations",
+    "Check: does x = 4 satisfy 2x + 3 = 11?": "Solving Linear Equations",
+    "What is 1/4 + 1/2?": "Fraction Arithmetic",
+    "A recipe serves 4 and needs 2 cups of flour. For 2 servings?": "Fraction Arithmetic",
+    "Which is largest: 2/3, 3/4, 5/8?": "Fraction Arithmetic",
+    "Which is an arguable thesis?": "Writing Thesis Statements",
+    "What is wrong with 'Pollution is bad'?": "Writing Thesis Statements",
+    "A good thesis usually appears…": "Writing Thesis Statements",
+    "In PEEL, the second E stands for…": "Paragraph Structure",
+    "How many main points per paragraph?": "Paragraph Structure",
+    "A hypothesis should be…": "Experimental Design",
+    "In a plant-growth experiment testing light, the dependent variable is…": (
+        "Experimental Design"
+    ),
+    "Controls exist to…": "Experimental Design",
+    "The SI unit of force is the…": "SI Units",
+    "A ruler marked in mm justifies which reading?": "Measurement Precision",
+    "An algorithm must be…": "Algorithms & Control Flow",
+    "Counting 1 to 10 uses…": "Algorithms & Control Flow",
+    "An if/else is an example of…": "Algorithms & Control Flow",
+    "Binary 101 in decimal is…": "Binary & Data Types",
+    "Why do types matter?": "Binary & Data Types",
+    "Mean of 2, 4, 6?": "Measures of Center",
+    "Incomes [30k, 32k, 35k, 900k], best center?": "Measures of Center",
+    "Mode of A, B, B, C?": "Measures of Center",
+    "Surveying only mall shoppers risks…": "Sampling Methods",
+    "Random sampling helps because…": "Sampling Methods",
+}
+
+
+def seed_skill_graph(db) -> None:
+    """Idempotent Skill Graph seed: topic skills + question edges.
+
+    Safe on repeat runs and on databases seeded before V2-A1: existing skill
+    rows are reused (topic set only when NULL — never clobbered), existing
+    edges are skipped, unknown prompts/topics are ignored.
+    """
+    for skill_name, subject_code, topic_title in SKILL_TAXONOMY:
+        skill = db.scalar(select(models.Skill).where(models.Skill.name == skill_name))
+        if not skill:
+            skill = models.Skill(name=skill_name)
+            db.add(skill)
+            db.flush()
+        if skill.topic_id is None:
+            subject = db.scalar(select(models.Subject).where(models.Subject.code == subject_code))
+            if subject is None:
+                continue
+            topic = db.scalar(
+                select(models.Topic).where(
+                    models.Topic.subject_id == subject.id, models.Topic.title == topic_title
+                )
+            )
+            if topic is not None:
+                skill.topic_id = topic.id
+    for prompt, skill_name in QUESTION_SKILL_MAP.items():
+        question = db.scalar(select(models.Question).where(models.Question.prompt == prompt))
+        skill = db.scalar(select(models.Skill).where(models.Skill.name == skill_name))
+        if question is None or skill is None:
+            continue
+        exists = db.scalar(
+            select(models.QuestionSkill).where(
+                models.QuestionSkill.question_id == question.id,
+                models.QuestionSkill.skill_id == skill.id,
+            )
+        )
+        if not exists:
+            db.add(models.QuestionSkill(question_id=question.id, skill_id=skill.id))

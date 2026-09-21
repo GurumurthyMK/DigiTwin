@@ -338,9 +338,21 @@ class TwinTopicOut(BaseModel):
 class TwinSkillOut(BaseModel):
     skill_id: str
     name: str
-    level: str
-    proficiency: float
+    # Self-report track (V1 meaning, unchanged): None when never self-reported.
+    level: str | None = None
+    proficiency: float | None = None
     evidence_count: int
+    # Provenance: self_report | assessed | self_report+assessed.
+    source: str = "self_report"
+    # Evidence-derived track (V2-B2): None/0 when no SkillEvidence exists.
+    mastery: float | None = None
+    confidence: float | None = None
+    skill_evidence_count: int = 0
+    correct_count: int = 0
+    incorrect_count: int = 0
+    trend: str | None = None
+    trend_slope: float | None = None
+    last_updated: str | None = None
 
 
 class TwinOut(BaseModel):
@@ -380,6 +392,23 @@ class TwinSnapshotOut(BaseModel):
     overall_accuracy: float | None = None
     changes: list[TwinChangeOut] = []
     summary: str = ""
+
+
+class TwinEvolutionEventOut(BaseModel):
+    id: str
+    created_at: object | None = None
+    trigger_type: str
+    trigger_id: str | None = None
+    attempt_id: str | None = None
+    snapshot_id: str
+    dimension: str
+    ref: str
+    label: str
+    metric: str
+    old_value: float | None = None
+    new_value: float | None = None
+    old_label: str | None = None
+    new_label: str | None = None
 
 
 # ---- AI intelligence (Phase 4A: structured objects, never prose-to-parse) ----

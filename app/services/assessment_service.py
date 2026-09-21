@@ -286,6 +286,16 @@ def submit_attempt(db: Session, user_id: str, attempt_id: str) -> s.AttemptResul
     from app.services import twin_service
 
     db.flush()
+    # V2-A3: skill evidence from the authoritative grades above — same
+    # transaction, so a failed submit leaves no orphaned evidence behind.
+    # V2-B2: the twin recompute below consumes these rows for the
+    # evidence-derived skill track (self-report track untouched).
+    from app.services import skill_graph
+
+    skill_graph.record_submission_evidence(db, attempt)
+    # SessionLocal runs with autoflush=False: flush the new evidence rows so
+    # the twin recompute below observes this very submission.
+    db.flush()
     snapshot, computed = twin_service.update_after_submit(db, attempt.profile_id, attempt)
     db.commit()
     db.refresh(attempt)

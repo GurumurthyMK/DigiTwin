@@ -75,6 +75,13 @@ def set_skill(db: Session, user_id: str, data: s.ProfileSkillIn) -> models.Profi
     else:
         link = models.ProfileSkill(profile_id=profile.id, skill_id=skill.id, level=data.level)
         db.add(link)
+    # V2-C1: the self-report track changed — recompute + snapshot the twin in
+    # the same transaction so history stays attributable (trigger
+    # profile_updated, no attempt reference). No notify fan-out here.
+    db.flush()
+    from app.services import twin_service
+
+    twin_service.update_after_profile_change(db, profile.id, skill.id)
     db.commit()
     db.refresh(link)
     return link
@@ -90,6 +97,11 @@ def remove_skill(db: Session, user_id: str, skill_id: str) -> None:
     if not link:
         raise AppError("not_found", "Skill not linked to profile.", 404)
     db.delete(link)
+    # V2-C1: same self-report hook as set_skill (same transaction).
+    db.flush()
+    from app.services import twin_service
+
+    twin_service.update_after_profile_change(db, profile.id, skill_id)
     db.commit()
 
 

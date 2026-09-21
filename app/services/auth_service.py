@@ -1,5 +1,6 @@
 """Auth application service: register/login/refresh/logout. No HTTP here."""
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
@@ -7,8 +8,11 @@ from sqlalchemy.orm import Session
 
 from app.core import security
 from app.core.config import get_settings
+from app.core.email import EmailSender
 from app.core.errors import AppError
 from app.db import models
+
+log = logging.getLogger(__name__)
 
 # Expired tokens linger this long before purge (lets recently-expired rows
 # still produce a clean invalid_refresh instead of vanishing mid-debug).
@@ -135,8 +139,18 @@ def purge_expired_tokens(db: Session) -> int:
 RESET_TTL_HOURS = 1
 
 
-def request_password_reset(db: Session, email: str) -> None:
-    """Always succeeds silently: unknown emails produce no row and no signal."""
+def request_password_reset(
+    db: Session,
+    email: str,
+    *,
+    email_sender: EmailSender | None = None,
+) -> None:
+    """Always succeeds silently: unknown emails produce no row and no signal.
+
+    Delivery failures are swallowed by design: the endpoint must stay a
+    uniform 200 so SMTP outages cannot reveal whether an account exists.
+    The minted token stays valid so the user can retry once mail recovers.
+    """
     from app.core import email as _email
 
     user = db.scalar(select(models.User).where(models.User.email == email.lower().strip()))
@@ -160,12 +174,11 @@ def request_password_reset(db: Session, email: str) -> None:
         )
     )
     db.commit()
-    _email.send(
-        user.email,
-        "DigiTwin password reset",
-        f"Use this one-hour link to reset your password: /reset?token={raw}",
-        sensitive=True,
-    )
+    try:
+        _email.send_password_reset(user.email, raw, sender=email_sender)
+    except Exception:  # noqa: BLE001 — delivery must never break the 200 contract
+        # Secret-free: recipient only, never the token, link, or credentials.
+        log.warning("password reset delivery failed to=%s", user.email)
 
 
 def confirm_password_reset(db: Session, raw_token: str, new_password: str) -> None:

@@ -172,7 +172,60 @@ def compute_profile_twin(db: Session, profile_id: str) -> dict:
             "evidence_count": total,
             "name": link.skill.name,
             "level": link.level,
+            # V2-B2 provenance + evidence track (filled below when evidence exists).
+            "source": "self_report",
+            "mastery": None,
+            "confidence": None,
+            "skill_evidence_count": 0,
+            "correct_count": 0,
+            "incorrect_count": 0,
+            "trend": None,
+            "trend_slope": None,
+            "last_updated": None,
         }
+    # V2-B2: evidence-derived state merges in WITHOUT touching the
+    # self-report track above. Profile-scoped: shared taxonomy skills can
+    # never leak another student's evidence into this twin.
+    from app.services import skill_mastery
+
+    derived = skill_mastery.skill_states_for_profile(db, profile_id)
+    if derived:
+        names = {
+            s.id: s.name
+            for s in db.scalars(
+                select(models.Skill).where(models.Skill.id.in_(list(derived)))
+            ).all()
+        }
+        for skid, st in derived.items():
+            if skid in skills:
+                skills[skid].update(
+                    source="self_report+assessed",
+                    mastery=st["mastery"],
+                    confidence=st["confidence"],
+                    skill_evidence_count=st["evidence_count"],
+                    correct_count=st["correct_count"],
+                    incorrect_count=st["incorrect_count"],
+                    trend=st["trend"],
+                    trend_slope=st["trend_slope"],
+                    last_updated=st["last_updated"],
+                )
+            else:
+                # Case C: evidence-discovered skill, never self-reported.
+                skills[skid] = {
+                    "proficiency": None,
+                    "evidence_count": total,
+                    "name": names.get(skid, skid),
+                    "level": None,
+                    "source": "assessed",
+                    "mastery": st["mastery"],
+                    "confidence": st["confidence"],
+                    "skill_evidence_count": st["evidence_count"],
+                    "correct_count": st["correct_count"],
+                    "incorrect_count": st["incorrect_count"],
+                    "trend": st["trend"],
+                    "trend_slope": st["trend_slope"],
+                    "last_updated": st["last_updated"],
+                }
 
     lessons = db.scalar(
         select(func.count())
@@ -218,12 +271,18 @@ def _persist(
         select(models.TwinTopicMastery).where(models.TwinTopicMastery.profile_id == profile_id)
     ):
         old_dims[("topic", row.topic_id)] = row.mastery
+    old_skill_mastery: dict[str, float | None] = {}
+    old_skill_confidence: dict[str, float | None] = {}
+    old_skill_trend: dict[str, str | None] = {}
     for row in db.scalars(
         select(models.TwinSkillProficiency).where(
             models.TwinSkillProficiency.profile_id == profile_id
         )
     ):
         old_dims[("skill", row.skill_id)] = row.proficiency
+        old_skill_mastery[row.skill_id] = row.mastery
+        old_skill_confidence[row.skill_id] = row.confidence
+        old_skill_trend[row.skill_id] = row.trend
 
     def upsert(model, ref_field: str, ref_id: str, value: float, evidence: int) -> None:
         row = db.scalar(
@@ -232,11 +291,37 @@ def _persist(
         if row is None:
             row = model(profile_id=profile_id, **{ref_field: ref_id})
             db.add(row)
-        if isinstance(row, models.TwinSkillProficiency):
-            row.proficiency = value
-        else:
-            row.mastery = value
+        row.mastery = value
         row.evidence_count = evidence
+
+    # V2-C1 evolution events: one structured record per metric that actually
+    # moved (same >= DELTA_EPS rule as `changes`). Collected alongside the
+    # legacy entries below, then persisted against the snapshot at the end —
+    # same transaction, so failed submits leave no partial history.
+    events: list[dict] = []
+
+    def _record(
+        dimension: str,
+        ref: str,
+        label: str,
+        metric: str,
+        old: float | None,
+        new: float | None,
+        old_label: str | None = None,
+        new_label: str | None = None,
+    ) -> None:
+        events.append(
+            {
+                "dimension": dimension,
+                "ref": ref,
+                "label": label,
+                "metric": metric,
+                "old": old,
+                "new": new,
+                "old_label": old_label,
+                "new_label": new_label,
+            }
+        )
 
     changes: list[dict] = []
     for sid, s in computed["subjects"].items():
@@ -252,6 +337,7 @@ def _persist(
                     "delta": round(s["mastery"] - old_dims[key], 4),
                 }
             )
+            _record("subject", sid, s["name"], "mastery", old_dims[key], s["mastery"])
         upsert(models.TwinSubjectMastery, "subject_id", sid, s["mastery"], s["evidence_count"])
     for tid, t in computed["topics"].items():
         key = ("topic", tid)
@@ -266,22 +352,97 @@ def _persist(
                     "delta": round(t["mastery"] - old_dims[key], 4),
                 }
             )
+            _record("topic", tid, t["title"], "mastery", old_dims[key], t["mastery"])
         upsert(models.TwinTopicMastery, "topic_id", tid, t["mastery"], t["evidence_count"])
     for skid, sk in computed["skills"].items():
         key = ("skill", skid)
-        if key in old_dims and abs(sk["proficiency"] - old_dims[key]) >= DELTA_EPS:
+        # Self-report track: unchanged rule, guarded for assessed-only rows
+        # whose proficiency is None (never diffed, never fabricated).
+        old_prof = old_dims.get(key)
+        if (
+            key in old_dims
+            and old_prof is not None
+            and sk["proficiency"] is not None
+            and abs(sk["proficiency"] - old_prof) >= DELTA_EPS
+        ):
             changes.append(
                 {
                     "dimension": "skill",
                     "ref": skid,
                     "label": sk["name"],
-                    "old": old_dims[key],
+                    "old": old_prof,
                     "new": sk["proficiency"],
-                    "delta": round(sk["proficiency"] - old_dims[key], 4),
+                    "delta": round(sk["proficiency"] - old_prof, 4),
                 }
             )
-        upsert(
-            models.TwinSkillProficiency, "skill_id", skid, sk["proficiency"], sk["evidence_count"]
+            _record("skill", skid, sk["name"], "proficiency", old_prof, sk["proficiency"])
+        # Evidence-derived track: same established rule applied to the new
+        # persisted dimension (first appearance upserts silently, like every
+        # other new dimension). Entry shape is identical to proficiency
+        # moves; provenance lives on the skill rows, not the delta log.
+        old_mastery = old_skill_mastery.get(skid)
+        if (
+            old_mastery is not None
+            and sk["mastery"] is not None
+            and abs(sk["mastery"] - old_mastery) >= DELTA_EPS
+        ):
+            changes.append(
+                {
+                    "dimension": "skill",
+                    "ref": skid,
+                    "label": sk["name"],
+                    "old": old_mastery,
+                    "new": sk["mastery"],
+                    "delta": round(sk["mastery"] - old_mastery, 4),
+                }
+            )
+            _record("skill", skid, sk["name"], "mastery", old_mastery, sk["mastery"])
+        # Confidence track: events only (no changes_json counterpart — the
+        # snapshot delta log keeps its exact established shape).
+        old_conf = old_skill_confidence.get(skid)
+        if (
+            old_conf is not None
+            and sk["confidence"] is not None
+            and abs(sk["confidence"] - old_conf) >= DELTA_EPS
+        ):
+            _record("skill", skid, sk["name"], "confidence", old_conf, sk["confidence"])
+        # Trend: events only on genuine direction transitions (both sides
+        # known and different) — slope wobble without a direction change is
+        # noise, not evolution.
+        old_trend = old_skill_trend.get(skid)
+        if old_trend is not None and sk["trend"] is not None and sk["trend"] != old_trend:
+            _record(
+                "skill",
+                skid,
+                sk["name"],
+                "trend",
+                None,
+                None,
+                old_label=old_trend,
+                new_label=sk["trend"],
+            )
+        row = db.scalar(
+            select(models.TwinSkillProficiency).where(
+                models.TwinSkillProficiency.profile_id == profile_id,
+                models.TwinSkillProficiency.skill_id == skid,
+            )
+        )
+        if row is None:
+            row = models.TwinSkillProficiency(profile_id=profile_id, skill_id=skid)
+            db.add(row)
+        row.proficiency = sk["proficiency"]
+        row.evidence_count = sk["evidence_count"]
+        row.source = sk["source"]
+        row.mastery = sk["mastery"]
+        row.confidence = sk["confidence"]
+        row.skill_evidence_count = sk["skill_evidence_count"]
+        row.correct_count = sk["correct_count"]
+        row.incorrect_count = sk["incorrect_count"]
+        row.trend = sk["trend"]
+        row.trend_slope = sk["trend_slope"]
+        last_updated = sk["last_updated"]
+        row.last_updated = (
+            datetime.fromisoformat(last_updated) if last_updated is not None else None
         )
 
     state.overall_mastery = computed["overall_mastery"]
@@ -306,6 +467,30 @@ def _persist(
         summary=summary,
     )
     db.add(snap)
+    db.flush()  # assign snap.id (and pending rows) before events reference it
+    # V2-C1: one structured event per recorded move, deterministic order,
+    # same transaction. Empty `events` means no meaningful change: snapshot
+    # still appended (established rule), but no evolution record is faked.
+    attempt_id = trigger_id if trigger_type == "assessment_submitted" else None
+    for ev in sorted(events, key=lambda e: (e["dimension"], e["ref"], e["metric"])):
+        db.add(
+            models.TwinEvolutionEvent(
+                profile_id=profile_id,
+                snapshot_id=snap.id,
+                created_at=snap.created_at,
+                trigger_type=trigger_type,
+                trigger_id=trigger_id,
+                attempt_id=attempt_id,
+                dimension=ev["dimension"],
+                ref=ev["ref"],
+                label=ev["label"],
+                metric=ev["metric"],
+                old_value=ev["old"],
+                new_value=ev["new"],
+                old_label=ev["old_label"],
+                new_label=ev["new_label"],
+            )
+        )
     return snap
 
 
@@ -332,6 +517,8 @@ def _summarize(
             )
         else:
             base = "Assessment submitted. "
+    elif trigger_type == "profile_updated":
+        base = "Self-reported skills updated. "
     else:
         base = "Learning progress updated. "
     if computed["overall_mastery"] is None:
@@ -354,6 +541,53 @@ def update_after_submit(
         _persist(db, profile_id, computed, "assessment_submitted", attempt.id),
         computed,
     )
+
+
+def update_after_profile_change(
+    db: Session, profile_id: str, skill_id: str | None
+) -> tuple[models.TwinSnapshot, dict]:
+    """V2-C1: recompute + persist + snapshot after a self-report skill change.
+
+    Same atomicity contract as submits (caller commits). trigger_id carries
+    the affected skill id; attempt references stay NULL, which marks these
+    events as originating from the profile/self-report track.
+    """
+    computed = compute_profile_twin(db, profile_id)
+    return (
+        _persist(db, profile_id, computed, "profile_updated", skill_id),
+        computed,
+    )
+
+
+def list_evolution_events(db: Session, profile_id: str, limit: int = 50) -> list[dict]:
+    """Profile-scoped evolution history, newest first, bounded. Never leaks
+    another student's events: every row is filtered by profile_id."""
+    rows = db.scalars(
+        select(models.TwinEvolutionEvent)
+        .where(models.TwinEvolutionEvent.profile_id == profile_id)
+        .order_by(models.TwinEvolutionEvent.created_at.desc(), models.TwinEvolutionEvent.id.desc())
+        .limit(min(max(limit, 1), 100))
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "profile_id": r.profile_id,
+            "snapshot_id": r.snapshot_id,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "trigger_type": r.trigger_type,
+            "trigger_id": r.trigger_id,
+            "attempt_id": r.attempt_id,
+            "dimension": r.dimension,
+            "ref": r.ref,
+            "label": r.label,
+            "metric": r.metric,
+            "old_value": r.old_value,
+            "new_value": r.new_value,
+            "old_label": r.old_label,
+            "new_label": r.new_label,
+        }
+        for r in rows
+    ]
 
 
 def read_twin(db: Session, profile_id: str) -> dict:
@@ -410,9 +644,24 @@ def read_twin(db: Session, profile_id: str) -> dict:
                 "level": sk["level"],
                 "proficiency": sk["proficiency"],
                 "evidence_count": sk["evidence_count"],
+                "source": sk["source"],
+                "mastery": sk["mastery"],
+                "confidence": sk["confidence"],
+                "skill_evidence_count": sk["skill_evidence_count"],
+                "correct_count": sk["correct_count"],
+                "incorrect_count": sk["incorrect_count"],
+                "trend": sk["trend"],
+                "trend_slope": sk["trend_slope"],
+                "last_updated": sk["last_updated"],
             }
             for skid, sk in sorted(
-                computed["skills"].items(), key=lambda kv: kv[1]["proficiency"], reverse=True
+                computed["skills"].items(),
+                key=lambda kv: (
+                    kv[1]["proficiency"]
+                    if kv[1]["proficiency"] is not None
+                    else (kv[1]["mastery"] if kv[1]["mastery"] is not None else 0.0)
+                ),
+                reverse=True,
             )
         ],
         "latest_change": latest.summary if latest else None,

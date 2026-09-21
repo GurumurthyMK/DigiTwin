@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
-    cors_origins: str = "http://localhost:5173,http://localhost:19006"
+    cors_origins: str = "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174,http://localhost:19006"
     log_level: str = "INFO"
     # Debt cleanup: brute-force protection + cookie transport toggles.
     rate_limit_enabled: bool = True
@@ -23,10 +23,25 @@ class Settings(BaseSettings):
     cookie_secure: bool = False  # True in production (HTTPS)
     cookie_samesite: str = "lax"  # lax|strict|none
     sentry_dsn: str = ""  # empty = error tracking disabled (dev default)
+    # Password-reset email delivery (P0-2A). email_backend="log" (dev default)
+    # records metadata only and never logs tokens; "smtp" delivers via SMTP.
+    email_backend: str = "log"  # log|smtp
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "no-reply@localhost"
+    smtp_use_tls: bool = True  # STARTTLS on the submission port
+    app_base_url: str = "http://localhost:5173"  # public web origin for reset links
 
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def smtp_configured(self) -> bool:
+        """True only when SMTP delivery is selected AND has a host to dial."""
+        return self.email_backend == "smtp" and bool(self.smtp_host.strip())
 
 
 @lru_cache
