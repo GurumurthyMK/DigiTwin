@@ -25,7 +25,9 @@ def overview(db: Session = Depends(get_db), user: models.User = Depends(get_curr
     profile = get_my_profile(db, user.id)
     feats = features.build_features(db, profile.id)
     tw = feats["twin"]
-    plan = engine.recommendations(feats)
+    from app.services import adaptive
+
+    plan = adaptive.build_adaptive_recommendations(db, profile.id)
     urgent = [i for i in engine.insights(feats) if i["priority"] <= 2][:3]
     live = db.scalars(
         select(models.Attempt)
@@ -73,6 +75,23 @@ def mentor_answer(
 ):
     profile = get_my_profile(db, user.id)
     return mentor.answer(features.build_features(db, profile.id), question)
+
+
+@router.post("/profiles/me/mentor/message", response_model=s.MentorMessageOut)
+def mentor_message(
+    body: s.MentorMessageIn,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Grounded Mentor (Set 3): free-text question -> Twin-grounded answer.
+
+    Session-scoped (no conversation persistence). Profile-scoped through the
+    authenticated user; the message is validated and treated as data.
+    """
+    from app.services import mentor_engine
+
+    profile = get_my_profile(db, user.id)
+    return mentor_engine.answer_mentor_message(db, profile.id, body.message)
 
 
 @router.get("/profiles/me/notifications", response_model=list[s.NotificationOut])

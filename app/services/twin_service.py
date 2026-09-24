@@ -590,8 +590,13 @@ def list_evolution_events(db: Session, profile_id: str, limit: int = 50) -> list
     ]
 
 
-def read_twin(db: Session, profile_id: str) -> dict:
-    """Persisted state + dimension rows + behavior counters (single payload for clients)."""
+def read_twin(db: Session, profile_id: str, now: datetime | None = None) -> dict:
+    """Persisted state + dimension rows + behavior counters (single payload for clients).
+
+    Retention is computed centrally here (server-authoritative): Web and Mobile
+    must never calculate different twin states. `now` may be injected for
+    deterministic testing; otherwise the server clock is used.
+    """
     computed = compute_profile_twin(db, profile_id)
     state = db.scalar(select(models.TwinState).where(models.TwinState.profile_id == profile_id))
     latest = db.scalars(
@@ -600,6 +605,39 @@ def read_twin(db: Session, profile_id: str) -> dict:
         .order_by(models.TwinSnapshot.created_at.desc())
         .limit(1)
     ).first()
+    # Centralized retention: one calculation for both clients.
+    from app.services import retention as _ret
+
+    fresh_map = _ret.retention_for_profile(db, profile_id, now=now)
+    def _skill_row(skid: str, sk: dict) -> dict:
+        f = fresh_map.get(skid)
+        if f is None:
+            f = {
+                "retention_state": "unknown",
+                "retention_score": None,
+                "days_since_last_evidence": None,
+                "last_evidence_at": None,
+            }
+        return {
+            "skill_id": skid,
+            "name": sk["name"],
+            "level": sk["level"],
+            "proficiency": sk["proficiency"],
+            "evidence_count": sk["evidence_count"],
+            "source": sk["source"],
+            "mastery": sk["mastery"],
+            "confidence": sk["confidence"],
+            "skill_evidence_count": sk["skill_evidence_count"],
+            "correct_count": sk["correct_count"],
+            "incorrect_count": sk["incorrect_count"],
+            "trend": sk["trend"],
+            "trend_slope": sk["trend_slope"],
+            "last_updated": sk["last_updated"],
+            "retention_state": f["retention_state"],
+            "retention_score": f["retention_score"],
+            "days_since_last_evidence": f["days_since_last_evidence"],
+            "last_evidence_at": f["last_evidence_at"],
+        }
     return {
         "has_evidence": computed["attempts_count"] > 0,
         "version": state.version if state else 0,
@@ -638,22 +676,7 @@ def read_twin(db: Session, profile_id: str) -> dict:
             )
         ],
         "skills": [
-            {
-                "skill_id": skid,
-                "name": sk["name"],
-                "level": sk["level"],
-                "proficiency": sk["proficiency"],
-                "evidence_count": sk["evidence_count"],
-                "source": sk["source"],
-                "mastery": sk["mastery"],
-                "confidence": sk["confidence"],
-                "skill_evidence_count": sk["skill_evidence_count"],
-                "correct_count": sk["correct_count"],
-                "incorrect_count": sk["incorrect_count"],
-                "trend": sk["trend"],
-                "trend_slope": sk["trend_slope"],
-                "last_updated": sk["last_updated"],
-            }
+            _skill_row(skid, sk)
             for skid, sk in sorted(
                 computed["skills"].items(),
                 key=lambda kv: (

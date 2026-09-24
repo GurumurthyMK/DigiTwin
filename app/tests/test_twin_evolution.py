@@ -578,7 +578,7 @@ def test_legacy_sqlite_upgrades_and_downgrades(tmp_path):
         assert "twin_evolution_events" in inspect(eng).get_table_names()
     finally:
         eng.dispose()
-    _alembic(["downgrade", "-1"], url)
+    _alembic(["downgrade", "0009_twin_skill_evidence_state"], url)
     eng = create_engine(url)
     try:
         assert "twin_evolution_events" not in inspect(eng).get_table_names()

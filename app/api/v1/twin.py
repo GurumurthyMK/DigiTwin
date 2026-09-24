@@ -23,6 +23,23 @@ def read_twin(db: Session = Depends(get_db), user: models.User = Depends(get_cur
     return twin_service.read_twin(db, profile.id)
 
 
+@router.get("/profiles/me/twin/analytics", response_model=s.TwinAnalyticsOut)
+def twin_analytics(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    from app.services import twin_analytics
+
+    profile = get_my_profile(db, user.id)
+    return twin_analytics.build_analytics(db, profile.id)
+
+
+# Alias: GET /api/v1/twin/analytics (same semantics, same scoping).
+@router.get("/twin/analytics", response_model=s.TwinAnalyticsOut)
+def twin_analytics_alias(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    from app.services import twin_analytics
+
+    profile = get_my_profile(db, user.id)
+    return twin_analytics.build_analytics(db, profile.id)
+
+
 @router.get("/profiles/me/twin/snapshots", response_model=list[s.TwinSnapshotOut])
 def twin_snapshots(
     limit: int = 20, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)

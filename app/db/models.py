@@ -556,6 +556,45 @@ class TwinEvolutionEvent(Base, UUIDMixin):
     new_label: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
+# ---------------- Set 2: adaptive recommendation feedback ----------------
+
+
+class RecommendationFeedback(Base, UUIDMixin, TimestampMixin):
+    """Append-only recommendation interaction history (Set 2).
+
+    Recommendations themselves are derived (recomputed from Twin state on
+    every read); this table records what the student DID with them so future
+    generations can adapt. Rows are never updated or deleted except by
+    profile cascade — history answers "did this recommendation lead to a
+    learning action?" without overwriting.
+
+    Semantics (do not confuse):
+    - accepted/started: student tapped the CTA ("clicked"). NOT completion.
+    - completed: student finished the linked learning action (lesson marked
+      completed, assessment submitted, or explicit client confirmation).
+      Only this counts as "led to a learning action".
+    - dismissed/skipped: student explicitly declined. Used only to reduce
+      repetition, never as negative ability signal.
+
+    Identity: `rec_key` is the stable deterministic id emitted by the
+    adaptive engine (e.g. "skill:<id>:refresh_stale"). Refs are snapshotted
+    as JSON for audit; server re-validates live refs on read.
+    """
+
+    __tablename__ = "recommendation_feedback"
+
+    profile_id: Mapped[str] = mapped_column(
+        ForeignKey("student_profiles.id", ondelete="CASCADE"), index=True
+    )
+    rec_key: Mapped[str] = mapped_column(String(160), index=True)
+    kind: Mapped[str] = mapped_column(String(48))  # engine rule id
+    title: Mapped[str] = mapped_column(String(200), default="")
+    refs_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(
+        String(16)
+    )  # accepted|started|completed|dismissed|skipped
+
+
 # ---------------- Phase 5A: product layer ----------------
 
 

@@ -79,7 +79,7 @@ def test_no_evidence_honest_states():
     assert "3 graded attempts" in pred["requires"] and pred["disclaimer"]
     plan = client.get("/api/v1/profiles/me/recommendations", headers=_h(t)).json()
     assert plan["today"], "even with zero evidence the student gets a starter plan"
-    assert plan["engine"] == "4a.1"
+    assert plan["engine"] in ("4a.1", "set2-adaptive-1.0")
     career = client.get("/api/v1/profiles/me/career", headers=_h(t)).json()
     assert career["taxonomy_version"] == "careers-4a.1" and career["disclaimer"]
     assert all(m["confidence"] == "low" for m in career["matches"])

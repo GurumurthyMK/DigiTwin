@@ -353,6 +353,33 @@ class TwinSkillOut(BaseModel):
     trend: str | None = None
     trend_slope: float | None = None
     last_updated: str | None = None
+    # Evidence freshness / retention signal (Set 1): separate dimension,
+    # never 0% when unknown. Unknown when no assessed evidence.
+    retention_state: str = "unknown"
+    retention_score: float | None = None
+    days_since_last_evidence: float | None = None
+    last_evidence_at: str | None = None
+
+
+class TwinAnalyticsSkillRetentionOut(BaseModel):
+    skill_id: str
+    name: str
+    mastery: float | None = None
+    confidence: float | None = None
+    retention_state: str
+    retention_score: float | None = None
+    days_since_last_evidence: float | None = None
+    last_evidence_at: str | None = None
+    trend: str | None = None
+    trend_slope: float | None = None
+    evidence_count: int = 0
+
+
+class TwinAnalyticsOut(BaseModel):
+    observed: dict
+    derived: dict
+    interpretation: dict
+    generated_at: object | None = None
 
 
 class TwinOut(BaseModel):
@@ -446,7 +473,7 @@ class PredictionOut(BaseModel):
 
 
 class RecommendationOut(BaseModel):
-    kind: str  # study_next|revise|skill
+    kind: str  # stable rule id (weak_skill|declining|retry|refresh|verify_strength|continue|consolidate|weak_topic|starter|review + legacy study_next|revise|skill)
     title: str
     reason: str
     evidence: list[EvidenceRefOut] = []
@@ -454,6 +481,10 @@ class RecommendationOut(BaseModel):
     est_minutes: int = 10
     refs: dict = {}
     generated_at: object | None = None
+    # Set 2 adaptive identity + feedback state (defaults keep legacy clients working).
+    rec_key: str = ""
+    status: str = "active"  # active|started|completed|dismissed (+accepted|skipped echoes)
+    is_stale: bool = False
 
 
 class StudyPlanOut(BaseModel):
@@ -461,6 +492,34 @@ class StudyPlanOut(BaseModel):
     queue: list[RecommendationOut] = []
     engine: str = ""
     generated_at: object | None = None
+
+
+class RecommendationFeedbackIn(BaseModel):
+    rec_key: str
+    kind: str = "unknown"
+    refs: dict = {}
+    action: str  # accepted|started|completed|dismissed|skipped
+    title: str = ""
+
+
+class RecommendationFeedbackOut(BaseModel):
+    id: str
+    rec_key: str
+    kind: str
+    title: str
+    refs: dict = {}
+    status: str
+    created_at: object | None = None
+
+
+class RecommendationHistoryOut(BaseModel):
+    id: str
+    rec_key: str
+    kind: str
+    title: str
+    refs: dict = {}
+    status: str
+    created_at: object | None = None
 
 
 class CareerFactorOut(BaseModel):
@@ -530,6 +589,27 @@ class MentorAnswerOut(BaseModel):
 
 class MentorQuestionsOut(BaseModel):
     questions: list[MentorFollowUp] = []
+
+
+class MentorMessageIn(BaseModel):
+    message: str
+
+
+class MentorActionRef(BaseModel):
+    kind: str = ""
+    title: str = ""
+    reason: str = ""
+    refs: dict = {}
+    rec_key: str = ""
+
+
+class MentorMessageOut(BaseModel):
+    answer: str
+    evidence: list[EvidenceRefOut] = []
+    actions: list[MentorActionRef] = []
+    follow_ups: list[MentorFollowUp] = []
+    provider: str = "fallback"
+    grounded: bool = True
 
 
 class NotificationOut(BaseModel):

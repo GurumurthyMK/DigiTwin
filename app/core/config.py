@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     smtp_from: str = "no-reply@localhost"
     smtp_use_tls: bool = True  # STARTTLS on the submission port
     app_base_url: str = "http://localhost:5173"  # public web origin for reset links
+    # Set 3 Mentor provider (optional). Default "fallback": deterministic,
+    # grounded, no network, no key required. Set mentor_provider="http" plus
+    # url/key/model to enable an OpenAI-compatible LLM; any failure degrades
+    # to the fallback. Env-based so deployments can switch without clients.
+    mentor_provider: str = "fallback"  # fallback|http
+    mentor_api_url: str = ""
+    mentor_api_key: str = ""
+    mentor_model: str = ""
+    mentor_timeout_seconds: float = 20.0
 
     @property
     def cors_origin_list(self) -> list[str]:

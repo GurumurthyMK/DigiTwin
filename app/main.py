@@ -33,6 +33,8 @@ else:
 async def lifespan(_: FastAPI):
     if get_settings().jwt_secret_key == "change-me-in-production-min-32-chars":
         log.warning("JWT_SECRET_KEY is the insecure default — set it before any shared deploy.")
+    elif len(get_settings().jwt_secret_key) < 32:
+        log.warning("JWT_SECRET_KEY is shorter than 32 chars — use a long random value.")
     # Phase 1A: auto-create tables for SQLite dev; Alembic used for explicit migrations.
     Base.metadata.create_all(bind=engine)
     try:
@@ -62,8 +64,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Brute-force shield for credential + token endpoints (fixed window per IP).
-_AUTH_SENSITIVE = {"/auth/register", "/auth/login", "/auth/refresh"}
+# Abuse shield for cheap-to-hit POST endpoints (fixed window per IP).
+# Credential + token endpoints (brute force) plus the Mentor message endpoint
+# (external-LLM cost when a provider is configured; cheap fallback otherwise).
+# Entries are full post-prefix path suffixes (see _auth_rate_limit below).
+_AUTH_SENSITIVE = {
+    "/auth/register",
+    "/auth/login",
+    "/auth/refresh",
+    "/profiles/me/mentor/message",
+}
 
 
 @app.middleware("http")

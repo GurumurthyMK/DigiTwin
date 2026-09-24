@@ -239,7 +239,31 @@ def save_answers(db: Session, user_id: str, attempt_id: str, data: s.AnswersUpda
                     selected_option_id=ans.selected_option_id,
                 )
             )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Concurrent autosaves raced on the same (attempt, question) row: the
+        # unique constraint fired on insert. Roll back and retry once against
+        # the winner's rows — drafts are last-writer-wins, never duplicated.
+        db.rollback()
+        for ans in data.answers:
+            row = db.scalar(
+                select(models.Answer).where(
+                    models.Answer.attempt_id == attempt.id, models.Answer.question_id == ans.question_id
+                )
+            )
+            if row is not None:
+                row.selected_option_id = ans.selected_option_id
+            else:
+                # The rolled-back pass may have held the only insert: re-add it.
+                db.add(
+                    models.Answer(
+                        attempt_id=attempt.id,
+                        question_id=ans.question_id,
+                        selected_option_id=ans.selected_option_id,
+                    )
+                )
+        db.commit()
     db.refresh(attempt)
     return _taking_view(db, attempt)
 
@@ -283,28 +307,55 @@ def submit_attempt(db: Session, user_id: str, attempt_id: str) -> s.AttemptResul
     # update twin state and append a snapshot — same transaction.
     # NOTE: SessionLocal runs with autoflush=False, so flush explicitly:
     # the evidence query must see this very submission.
+    # The whole tail (flushes, evidence, twin, commit) is one atomic unit:
+    # a concurrent duplicate submit racing here surfaces as IntegrityError
+    # and is handled below — never a partial Twin/evidence state.
     from app.services import twin_service
 
-    db.flush()
-    # V2-A3: skill evidence from the authoritative grades above — same
-    # transaction, so a failed submit leaves no orphaned evidence behind.
-    # V2-B2: the twin recompute below consumes these rows for the
-    # evidence-derived skill track (self-report track untouched).
-    from app.services import skill_graph
+    try:
+        db.flush()
+        # V2-A3: skill evidence from the authoritative grades above — same
+        # transaction, so a failed submit leaves no orphaned evidence behind.
+        # V2-B2: the twin recompute below consumes these rows for the
+        # evidence-derived skill track (self-report track untouched).
+        from app.services import skill_graph
 
-    skill_graph.record_submission_evidence(db, attempt)
-    # SessionLocal runs with autoflush=False: flush the new evidence rows so
-    # the twin recompute below observes this very submission.
-    db.flush()
-    snapshot, computed = twin_service.update_after_submit(db, attempt.profile_id, attempt)
-    db.commit()
+        skill_graph.record_submission_evidence(db, attempt)
+        # SessionLocal runs with autoflush=False: flush the new evidence rows so
+        # the twin recompute below observes this very submission.
+        db.flush()
+        snapshot, computed = twin_service.update_after_submit(db, attempt.profile_id, attempt)
+        db.commit()
+    except IntegrityError:
+        # Concurrent duplicate submits raced past the status check: roll back
+        # the loser's partial work. If the winner committed, serve its stored
+        # result (idempotent recovery); otherwise report a retryable conflict
+        # — never a partial Twin/evidence state, never a 500.
+        db.rollback()
+        db.expire_all()
+        winner = db.get(models.Attempt, attempt.id)
+        if winner is not None and winner.status == "submitted":
+            return result_view(db, winner)
+        raise AppError(
+            "submit_conflict",
+            "Submission conflicted with a concurrent request; retry.",
+            409,
+        )
     db.refresh(attempt)
     result = result_view(db, attempt)
     # Phase 5A: event notifications fan out from the stored snapshot (own commit).
+    # Best-effort: notification failures must never fail an already-submitted
+    # assessment. The graded result below is already committed above.
     from app.services import notify_service
 
-    notify_service.notify_after_submit(db, attempt.profile_id, snapshot, computed)
-    db.commit()
+    try:
+        notify_service.notify_after_submit(db, attempt.profile_id, snapshot, computed)
+        db.commit()
+    except Exception:  # noqa: BLE001 — notifications are advisory; log and continue
+        import logging
+
+        logging.getLogger(__name__).warning("post-submit notifications skipped", exc_info=True)
+        db.rollback()
     return result
 
 
